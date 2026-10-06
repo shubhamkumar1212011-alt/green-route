@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Green-Route Drone Delivery (Live Map)</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root{--bg:#eaf5ef;--ink:#0d2b33;--card:rgba(255,255,255,.85);--accent:#0b8a4d;--warm:#b96f00;--line:rgba(13,43,51,.2);--btn:#0d2b33;--btnink:#eaf5ef}
+@media (prefers-color-scheme:dark){:root{--bg:#07222b;--ink:#e6f4ee;--card:rgba(10,40,50,.85);--accent:#6ee7a0;--warm:#ffcf66;--line:rgba(230,244,238,.22);--btn:#6ee7a0;--btnink:#07222b}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font-family:'Sora',system-ui,sans-serif;min-height:100vh}
+#bg{position:fixed;inset:0;width:100%;height:100%;z-index:-1}
+main{max-width:1100px;margin:0 auto;padding:28px 18px 48px}
+h1{font-size:clamp(2rem,6vw,3.2rem);font-weight:800;line-height:1.05;margin:0 0 10px;letter-spacing:-.02em}
+.sub{max-width:54ch;line-height:1.6;margin:0 0 24px;opacity:.85}
+.grid{display:grid;grid-template-columns:minmax(0,5fr) minmax(0,6fr);gap:18px}
+@media(max-width:820px){.grid{grid-template-columns:1fr}}
+.card{background:var(--card);border:1px solid var(--line);border-radius:14px;padding:18px;backdrop-filter:blur(8px)}
+label{display:block;font-size:.85rem;margin:0 0 6px;font-weight:600}
+input,button{font:inherit;width:100%;padding:12px;border-radius:10px;border:1px solid var(--line)}
+input{background:var(--bg);color:var(--ink);margin-bottom:14px}
+button{background:var(--btn);color:var(--btnink);font-weight:600;cursor:pointer;border:0}
+button:disabled{opacity:.6;cursor:wait}
+button:focus-visible,input:focus-visible{outline:3px solid var(--warm);outline-offset:2px}
+#err{color:var(--warm);min-height:1.3em;margin:10px 0 0;font-size:.9rem}
+.path{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:16px 0 12px;font-weight:600}
+.path span{padding:4px 10px;border:1px solid var(--accent);border-radius:99px;font-size:.82rem}
+.path i{font-style:normal;color:var(--accent)}
+table{width:100%;border-collapse:collapse;font-size:.92rem}
+td{padding:7px 0;border-bottom:1px solid var(--line)}
+td:last-child{text-align:right;font-weight:600}
+.big td{color:var(--accent)}
+#map{height:540px;border-radius:10px;border:1px solid var(--line)}
+.hint,.note{opacity:.75;font-size:.82rem;line-height:1.5}
+.key{display:flex;gap:16px;font-size:.8rem;margin-top:8px}
+.key b{display:inline-block;width:22px;height:4px;vertical-align:middle;margin-right:6px;border-radius:2px}
+@media(prefers-reduced-motion:reduce){*{animation:none!important}}
+</style></head>
+<body>
+<canvas id="bg" aria-hidden="true"></canvas>
+<main>
+  <h1>Green-Route<br>Drone Delivery</h1>
+  <p class="sub">Type any pickup and destination in South Bengaluru. We fly the drone through charging hubs and compare it with the real road route.</p>
+  <div class="grid">
+    <section>
+      <div class="card">
+        <label for="src">Pickup location</label>
+        <input id="src" placeholder="e.g. Silk Board" autocomplete="off">
+        <label for="dst">Destination</label>
+        <input id="dst" placeholder="e.g. Banashankari Temple" autocomplete="off">
+        <button id="go">Find drone route</button>
+        <p id="err" role="alert"></p>
+        <p class="hint">Coverage: South Bengaluru. Drone range per hop: 8 km.</p>
+      </div>
+      <div class="card" id="out" style="margin-top:18px;display:none"></div>
+    </section>
+    <section class="card">
+      <div id="map"></div>
+      <div class="key"><span><b style="background:#0b8a4d"></b>Drone route</span><span><b style="background:#d98a00"></b>Road route</span></div>
+    </section>
+  </div>
+  <p class="note">Search by Nominatim and road routes by OSRM, both free OpenStreetMap services. Drone distance is calculated with the Haversine formula and Dijkstra's algorithm in this page. Energy values are approximate: bike 0.315 kWh/km, drone 0.045 kWh/km, 0.82 kg CO2 per kWh.</p>
+</main>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+const HUBS=[["Electronic City",12.8452,77.6602],["HSR Layout",12.9116,77.6474],["Koramangala",12.9352,77.6245],["BTM Layout",12.9166,77.6101],["Jayanagar",12.9308,77.5838],["JP Nagar",12.9063,77.5857],["Banashankari",12.9255,77.5468],["DSCE Campus (Kumaraswamy Layout)",12.9081,77.5649]];
+const N=HUBS.length,RANGE=8,ROAD_FALLBACK=1.4,BIKE=0.315,DRONE=0.045,CO2=0.82,INF=1e9;
+const $=id=>document.getElementById(id);
+const esc=s=>String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+function hav(a,b){const r=Math.PI/180,R=6371,dl=(b[0]-a[0])*r,dn=(b[1]-a[1])*r;
+ const x=Math.sin(dl/2)**2+Math.cos(a[0]*r)*Math.cos(b[0]*r)*Math.sin(dn/2)**2;
+ return R*2*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
+const P=h=>[h[1],h[2]]; // [lat,lon]
+const G=HUBS.map((a,i)=>HUBS.map((b,j)=>{if(i===j)return 0;const d=hav(P(a),P(b));return d<=RANGE?d:0}));
+function dijkstra(s){const dist=Array(N).fill(INF),par=Array(N).fill(-1),vis=Array(N).fill(false);dist[s]=0;
+ for(let c=0;c<N;c++){let u=-1,m=INF;for(let v=0;v<N;v++)if(!vis[v]&&dist[v]<m){m=dist[v];u=v}
+  if(u<0)break;vis[u]=true;
+  for(let v=0;v<N;v++)if(!vis[v]&&G[u][v]>0&&dist[u]+G[u][v]<dist[v]){dist[v]=dist[u]+G[u][v];par[v]=u}}
+ return{dist,par};}
+const nearest=p=>{let b=0;HUBS.forEach((h,i)=>{if(hav(p,P(h))<hav(p,P(HUBS[b])))b=i});return b};
+/* map */
+const map=L.map("map").setView([12.90,77.60],12);
+L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png",{attribution:"&copy; OpenStreetMap contributors",maxZoom:19}).addTo(map);
+HUBS.forEach(h=>L.circleMarker(P(h),{radius:5,color:"#0b8a4d",fillColor:"#fff",fillOpacity:1,weight:2}).addTo(map).bindTooltip(h[0]));
+const layer=L.layerGroup().addTo(map);
+/* APIs */
+async function geocode(q){
+ const u="https://nominatim.openstreetmap.org/search?format=json&limit=1&countrycodes=in&viewbox=77.45,13.02,77.75,12.78&bounded=1&q="+encodeURIComponent(q+", Bengaluru");
+ const r=await fetch(u);if(!r.ok)throw new Error("search");const j=await r.json();
+ return j.length?{p:[+j[0].lat,+j[0].lon],name:j[0].display_name.split(",").slice(0,2).join(",")}:null;}
+async function roadRoute(a,b){
+ try{const r=await fetch(`https://router.project-osrm.org/route/v1/driving/${a[1]},${a[0]};${b[1]},${b[0]}?overview=full&geometries=geojson`);
+  const j=await r.json();if(j.code!=="Ok")throw 0;
+  return{km:j.routes[0].distance/1000,line:j.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]),live:true};
+ }catch(e){return{km:hav(a,b)*ROAD_FALLBACK,line:[a,b],live:false}}}
+/* main */
+async function run(){
+ const err=$("err"),btn=$("go"),qa=$("src").value.trim(),qb=$("dst").value.trim();err.textContent="";
+ if(!qa||!qb){err.textContent="Enter both a pickup and a destination.";return}
+ btn.disabled=true;btn.textContent="Finding route...";
+ try{
+  const [A,B]=await Promise.all([geocode(qa),geocode(qb)]);
+  if(!A||!B){err.textContent=`Could not find ${!A?"the pickup":"the destination"} in South Bengaluru. Try adding the area name.`;return}
+  let pts,names=[A.name];
+  const direct=hav(A.p,B.p);
+  if(direct<=RANGE){pts=[A.p,B.p]}
+  else{
+   const a=nearest(A.p),b=nearest(B.p);
+   if(hav(A.p,P(HUBS[a]))>RANGE||hav(B.p,P(HUBS[b]))>RANGE){err.textContent="That location is too far from any drone hub. Choose a place inside South Bengaluru.";return}
+   const{dist,par}=dijkstra(a);
+   if(dist[b]>=INF){err.textContent="No drone route is possible within the range limit.";return}
+   const path=[];for(let v=b;v!==-1;v=par[v])path.push(v);path.reverse();
+   pts=[A.p,...path.map(i=>P(HUBS[i])),B.p];names.push(...path.map(i=>HUBS[i][0]));
+  }
+  names.push(B.name);
+  let air=0;for(let i=0;i<pts.length-1;i++)air+=hav(pts[i],pts[i+1]);
+  const rd=await roadRoute(A.p,B.p);
+  const be=rd.km*BIKE,de=air*DRONE,sv=be-de,f=n=>n.toFixed(2);
+  layer.clearLayers();
+  L.polyline(rd.line,{color:"#d98a00",weight:4,opacity:.85}).addTo(layer);
+  L.polyline(pts,{color:"#0b8a4d",weight:5}).addTo(layer);
+  L.circleMarker(A.p,{radius:9,color:"#0b8a4d",fillColor:"#0b8a4d",fillOpacity:1}).addTo(layer).bindTooltip("Pickup");
+  L.circleMarker(B.p,{radius:9,color:"#b00020",fillColor:"#b00020",fillOpacity:1}).addTo(layer).bindTooltip("Destination");
+  map.fitBounds(L.latLngBounds(pts.concat(rd.line)).pad(.15));
+  const out=$("out");out.style.display="block";
+  out.innerHTML=`<div class="path" style="margin-top:0">${names.map((n,i)=>(i?"<i>&rarr;</i>":"")+`<span>${esc(n)}</span>`).join("")}</div>
+  <table><tr><td>Drone distance</td><td>${f(air)} km</td></tr>
+  <tr><td>Road distance ${rd.live?"":"(estimated)"}</td><td>${f(rd.km)} km</td></tr>
+  <tr><td>Petrol bike energy</td><td>${f(be)} kWh</td></tr><tr><td>Drone energy</td><td>${f(de)} kWh</td></tr>
+  <tr class="big"><td>Energy conserved</td><td>${f(sv)} kWh (${f(sv/be*100)}%)</td></tr>
+  <tr class="big"><td>CO2 reduced</td><td>${f(sv*CO2)} kg</td></tr></table>
+  ${rd.live?"":'<p class="hint">Road service unavailable, so road distance is aerial x 1.4.</p>'}`;
+ }catch(e){err.textContent="Could not reach the map services. Check your internet and try again."}
+ finally{btn.disabled=false;btn.textContent="Find drone route"}
+}
+$("go").onclick=run;
+["src","dst"].forEach(id=>$(id).addEventListener("keydown",e=>{if(e.key==="Enter")run()}));
+/* animated background */
+const cv=$("bg"),cx=cv.getContext("2d");let w,h,D=[];
+function size(){w=cv.width=innerWidth;h=cv.height=innerHeight}size();addEventListener("resize",size);
+const rnd=(a,b)=>a+Math.random()*(b-a);
+for(let i=0;i<16;i++)D.push({x:rnd(0,innerWidth),y:rnd(0,innerHeight),vx:rnd(.3,.9)*(Math.random()<.5?-1:1),vy:rnd(-.25,.25),s:rnd(5,10),r:rnd(0,6)});
+function tick(){cx.clearRect(0,0,w,h);const c=getComputedStyle(document.documentElement).getPropertyValue("--accent").trim()||"#0b8a4d";
+ D.forEach(d=>{d.x+=d.vx;d.y+=d.vy;d.r+=.35;
+  if(d.x<-60)d.x=w+60;if(d.x>w+60)d.x=-60;if(d.y<-40)d.y=h+40;if(d.y>h+40)d.y=-40;
+  cx.globalAlpha=.22;cx.strokeStyle=c;cx.lineWidth=1.5;cx.setLineDash([4,6]);cx.beginPath();cx.moveTo(d.x-d.vx*90,d.y-d.vy*90);cx.lineTo(d.x,d.y);cx.stroke();cx.setLineDash([]);
+  cx.globalAlpha=.5;cx.save();cx.translate(d.x,d.y);cx.rotate(d.r);cx.beginPath();cx.moveTo(-d.s,0);cx.lineTo(d.s,0);cx.moveTo(0,-d.s);cx.lineTo(0,d.s);cx.stroke();
+  cx.beginPath();cx.arc(0,0,d.s*.3,0,7);cx.fillStyle=c;cx.fill();cx.restore()});
+ requestAnimationFrame(tick)}
+if(!matchMedia("(prefers-reduced-motion: reduce)").matches)tick();
+</script></body></html>
