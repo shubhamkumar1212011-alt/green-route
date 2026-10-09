@@ -23,6 +23,12 @@ button{background:var(--btn);color:var(--btnink);font-weight:600;cursor:pointer;
 button:disabled{opacity:.6;cursor:wait}
 button:focus-visible,input:focus-visible{outline:3px solid var(--warm);outline-offset:2px}
 #err{color:var(--warm);min-height:1.3em;margin:10px 0 0;font-size:.9rem}
+.field{position:relative;margin-bottom:14px}
+.field input{margin-bottom:0}
+.sugg{position:absolute;left:0;right:0;top:calc(100% + 4px);z-index:1000;margin:0;padding:4px;list-style:none;background:var(--bg);border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.18);display:none}
+.sugg li{padding:9px 10px;border-radius:7px;cursor:pointer;font-size:.92rem}
+.sugg li.on,.sugg li:hover{background:var(--accent);color:var(--btnink)}
+.sugg b{font-weight:800}
 .path{display:flex;flex-wrap:wrap;gap:6px;align-items:center;margin:16px 0 12px;font-weight:600}
 .path span{padding:4px 10px;border:1px solid var(--accent);border-radius:99px;font-size:.82rem}
 .path i{font-style:normal;color:var(--accent)}
@@ -43,11 +49,17 @@ td:last-child{text-align:right;font-weight:600}
   <p class="sub">Type any pickup and destination in South Bengaluru. We fly the drone through charging hubs and compare it with the real road route.</p>
   <div class="grid">
     <section>
-      <div class="card">
+      <div class="card" style="position:relative;z-index:5">
         <label for="src">Pickup location</label>
-        <input id="src" placeholder="e.g. Silk Board" autocomplete="off">
+        <div class="field">
+          <input id="src" placeholder="Start typing, e.g. K" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="src-list" aria-expanded="false">
+          <ul class="sugg" id="src-list" role="listbox"></ul>
+        </div>
         <label for="dst">Destination</label>
-        <input id="dst" placeholder="e.g. Banashankari Temple" autocomplete="off">
+        <div class="field">
+          <input id="dst" placeholder="Start typing, e.g. B" autocomplete="off" role="combobox" aria-autocomplete="list" aria-controls="dst-list" aria-expanded="false">
+          <ul class="sugg" id="dst-list" role="listbox"></ul>
+        </div>
         <button id="go">Find drone route</button>
         <p id="err" role="alert"></p>
         <p class="hint">Coverage: South Bengaluru. Drone range per hop: 8 km.</p>
@@ -93,13 +105,57 @@ async function roadRoute(a,b){
   const j=await r.json();if(j.code!=="Ok")throw 0;
   return{km:j.routes[0].distance/1000,line:j.routes[0].geometry.coordinates.map(c=>[c[1],c[0]]),live:true};
  }catch(e){return{km:hav(a,b)*ROAD_FALLBACK,line:[a,b],live:false}}}
+/* location suggestions (local list, instant, no API call) */
+const PLACES=[["Koramangala",12.9352,77.6245],["Kumaraswamy Layout",12.9081,77.5649],["Kengeri",12.9150,77.4830],["Konanakunte",12.8830,77.5800],["Kanakapura Road",12.8800,77.5700],
+["HSR Layout",12.9116,77.6474],["Hulimavu",12.8760,77.6000],["BTM Layout",12.9166,77.6101],["Banashankari",12.9255,77.5468],["Basavanagudi",12.9422,77.5738],
+["Bannerghatta Road",12.8930,77.5970],["Bommanahalli",12.9081,77.6238],["Bellandur",12.9304,77.6784],["Jayanagar",12.9308,77.5838],["JP Nagar",12.9063,77.5857],
+["Electronic City",12.8452,77.6602],["Silk Board",12.9177,77.6238],["Madiwala",12.9226,77.6174],["Lalbagh",12.9507,77.5848],["Wilson Garden",12.9460,77.5970],
+["Ejipura",12.9425,77.6270],["Arekere",12.8890,77.6040],["Agara",12.9250,77.6490],["Gottigere",12.8570,77.5930],["Uttarahalli",12.9010,77.5420],
+["Girinagar",12.9400,77.5390],["Chikkalasandra",12.9060,77.5450],["Puttenahalli",12.8960,77.5860],["Anjanapura",12.8630,77.5600],["DSCE Campus",12.9081,77.5649]];
+function attachSuggest(id){
+ const inp=$(id),box=$(id+"-list");let items=[],act=-1;
+ const close=()=>{box.style.display="none";act=-1;inp.setAttribute("aria-expanded","false")};
+ const pick=p=>{inp.value=p[0];inp.dataset.lat=p[1];inp.dataset.lon=p[2];inp.dataset.name=p[0];close()};
+ const mark=()=>[...box.children].forEach((li,i)=>li.classList.toggle("on",i===act));
+ function show(){
+  inp.dataset.lat="";
+  const q=inp.value.trim().toLowerCase();
+  if(!q){close();return}
+  const starts=PLACES.filter(p=>p[0].toLowerCase().startsWith(q));
+  const words=PLACES.filter(p=>!starts.includes(p)&&p[0].toLowerCase().split(" ").some(w=>w.startsWith(q)));
+  items=starts.concat(words).slice(0,6);
+  if(!items.length){close();return}
+  box.innerHTML=items.map((p,i)=>`<li role="option" data-i="${i}"><b>${esc(p[0].slice(0,q.length))}</b>${esc(p[0].slice(q.length))}</li>`).join("");
+  box.style.display="block";inp.setAttribute("aria-expanded","true");act=-1;
+ }
+ inp.addEventListener("input",show);
+ inp.addEventListener("focus",()=>{if(inp.value.trim()&&!inp.dataset.lat)show()});
+ inp.addEventListener("blur",()=>setTimeout(close,120));
+ box.addEventListener("mousedown",e=>{const li=e.target.closest("li");if(li){e.preventDefault();pick(items[+li.dataset.i])}});
+ inp.addEventListener("keydown",e=>{
+  const open=box.style.display==="block";
+  if(e.key==="ArrowDown"&&open){e.preventDefault();act=(act+1)%items.length;mark()}
+  else if(e.key==="ArrowUp"&&open){e.preventDefault();act=(act-1+items.length)%items.length;mark()}
+  else if(e.key==="Escape"){close()}
+  else if(e.key==="Enter"){
+   if(open&&act>=0){e.preventDefault();pick(items[act])}
+   else{close();run()}
+  }
+ });
+}
+async function resolvePlace(id,q){
+ const el=$(id);
+ if(el.dataset.lat&&el.dataset.name===q)return{p:[+el.dataset.lat,+el.dataset.lon],name:q};
+ const hit=PLACES.find(p=>p[0].toLowerCase()===q.toLowerCase());
+ return hit?{p:[hit[1],hit[2]],name:hit[0]}:geocode(q);
+}
 /* main */
 async function run(){
  const err=$("err"),btn=$("go"),qa=$("src").value.trim(),qb=$("dst").value.trim();err.textContent="";
  if(!qa||!qb){err.textContent="Enter both a pickup and a destination.";return}
  btn.disabled=true;btn.textContent="Finding route...";
  try{
-  const [A,B]=await Promise.all([geocode(qa),geocode(qb)]);
+  const [A,B]=await Promise.all([resolvePlace("src",qa),resolvePlace("dst",qb)]);
   if(!A||!B){err.textContent=`Could not find ${!A?"the pickup":"the destination"} in South Bengaluru. Try adding the area name.`;return}
   let pts,names=[A.name];
   const direct=hav(A.p,B.p);
@@ -134,7 +190,7 @@ async function run(){
  finally{btn.disabled=false;btn.textContent="Find drone route"}
 }
 $("go").onclick=run;
-["src","dst"].forEach(id=>$(id).addEventListener("keydown",e=>{if(e.key==="Enter")run()}));
+attachSuggest("src");attachSuggest("dst");
 /* animated background */
 const cv=$("bg"),cx=cv.getContext("2d");let w,h,D=[];
 function size(){w=cv.width=innerWidth;h=cv.height=innerHeight}size();addEventListener("resize",size);
